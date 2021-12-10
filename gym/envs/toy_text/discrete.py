@@ -3,27 +3,30 @@ from gym import Env, spaces
 from gym.utils import seeding
 
 
-#def categorical_sample(prob_n, np_random):
-#    """
-#    Sample from categorical distribution
-#    Each row specifies class probabilities
-#    """
-#    prob_n = np.asarray(prob_n)
-#    csprob_n = np.cumsum(prob_n)
-#    return (csprob_n > np_random.rand()).argmax()
+def categorical_sample_naive(prob_n, np_random):
+    """
+    *** ORIGINAL CATEGORICAL SAMPLE FUNCTION ***
+    Bad because it gens the distribution to sample from each time,
+    and iterates over whole list of cum. probs to pick an index.
+
+    Sample from categorical distribution
+    Each row specifies class probabilities
+    """
+    prob_n = np.asarray(prob_n)
+    csprob_n = np.cumsum(prob_n)
+    return (csprob_n > np_random.rand()).argmax()
 
 
-def categorical_sample(csprob_n, np_random):
-    """Sample from categorical distribution with cumulative probabilities
-    pre-calced."""
-    rand = np.random.rand()
-    for (i, e) in enumerate(csprob_n):
-        if e > rand:
-            return i
+def categorical_sample_fast(csprob_n_with_idxs, np_random):
+    """Sample from categorical distribution of transitions with cumulative
+    probabilities pre-calced from transitions probs. in desc. order."""
+    rand = np_random.rand()
+    for (idx, prob) in csprob_n_with_idxs:
+        if prob > rand:
+            return idx
 
 
 class DiscreteEnv(Env):
-
     """
     Has the following members
     - nS: number of states
@@ -37,7 +40,6 @@ class DiscreteEnv(Env):
 
 
     """
-
     def __init__(self, nS, nA, P, isd):
         self.P = P
         self.isd = isd
@@ -45,49 +47,59 @@ class DiscreteEnv(Env):
         self.nS = nS
         self.nA = nA
 
-        self._csprob_ns = self._gen_csprob_ns(self.P, self.nS, self.nA)
-
         self.action_space = spaces.Discrete(self.nA)
         self.observation_space = spaces.Discrete(self.nS)
 
         self.seed()
-        self.s = categorical_sample(self.isd, self.np_random)
-
-    def _gen_csprob_ns(self, P, nS, nA):
-        """Cache the cumulative next state probabilities for each (s, a)
-        pair to make sampling transitions faster."""
-        csprob_ns = {}
-        for s in range(nS):
-            for a in range(nA):
-                transitions = P[s][a]
-                prob_n = np.asarray([t[0] for t in transitions])
-                csprob_n = np.cumsum(prob_n)
-                assert csprob_n[-1] == 1.0
-                csprob_ns[s][a] = csprob_n
-        return csprob_ns
+        self.s = categorical_sample_naive(self.isd, self.np_random)
 
     def seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)
         return [seed]
 
     def reset(self):
-        self.s = categorical_sample(self.isd, self.np_random)
+        self.s = categorical_sample_naive(self.isd, self.np_random)
         self.lastaction = None
         return int(self.s)
 
-#    def step(self, a):
-#        transitions = self.P[self.s][a]
-#        i = categorical_sample([t[0] for t in transitions], self.np_random)
-#        p, s, r, d = transitions[i]
-#        self.s = s
-#        self.lastaction = a
-#        return (int(s), r, d, {"prob": p})
-
     def step(self, a):
         transitions = self.P[self.s][a]
-        csprob_n = self._csprob_ns[self.s][a]
-        i = categorical_sample(csprob_n, self.np_random)
+        csprob_n_with_idxs = self.csprob_ns_with_idxs[self.s][a]
+        i = categorical_sample_fast(csprob_n_with_idxs, self.np_random)
         p, s, r, d = transitions[i]
         self.s = s
         self.lastaction = a
         return (int(s), r, d, {"prob": p})
+
+    def gen_csprob_ns_with_idxs(self):
+        """Cache the cumulative next state probabilities *in descending
+        order * for each (s, a) pair to make sampling transitions faster.
+        Storing in desc. order reduces expected number of iterations through
+        cum. probs list each time a sample is drawn."""
+        P = self.P
+        nS = self.nS
+        nA = self.nA
+        csprob_ns_with_idxs = {
+            s: {a: []
+                for a in range(nA)}
+            for s in range(nS)
+        }
+        for s in range(nS):
+            for a in range(nA):
+                transitions = P[s][a]
+                prob_n_with_idxs = list(enumerate([t[0] for t in transitions]))
+
+                # sort probs in desc. order
+                sorted_prob_n_with_idxs = \
+                    sorted(prob_n_with_idxs, key=lambda tup: tup[1],
+                           reverse=True)
+
+                csprob_n_with_idxs = []
+                prob_sum = 0.0
+                for (idx, prob) in sorted_prob_n_with_idxs:
+                    prob_sum += prob
+                    csprob_n_with_idxs.append((idx, prob_sum))
+                assert prob_sum == 1.0
+
+                csprob_ns_with_idxs[s][a] = csprob_n_with_idxs
+        return csprob_ns_with_idxs
